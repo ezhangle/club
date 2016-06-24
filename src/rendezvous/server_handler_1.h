@@ -29,6 +29,16 @@ class server;
 
 class server_handler_1 {
   using service_type = uint32_t;
+
+  struct Request {
+    service_type service;
+    bool         is_host;
+
+    bool operator < (const Request& r) const {
+      return std::tie(service, is_host) < std::tie(r.service, r.is_host);
+    }
+  };
+
   using udp = boost::asio::ip::udp;
   using Address = boost::asio::ip::address;
 
@@ -62,7 +72,7 @@ public:
 
 private:
   void on_alarm();
-  DMS make_dms( service_type service
+  DMS make_dms( Request
               , udp::endpoint
               , udp::endpoint);
 
@@ -80,8 +90,8 @@ private:
   StatePtr  _state;
   options   _options;
 
-  std::map<udp::endpoint, service_type> ep_to_service;
-  std::map<service_type, DMS> service_to_dms;
+  std::map<udp::endpoint, Request> ep_to_request;
+  std::map<Request, DMS> request_to_dms;
 };
 
 } // rendezvous namespace
@@ -102,10 +112,10 @@ server_handler_1::server_handler_1( boost::asio::io_service& ios
 //------------------------------------------------------------------------------
 inline
 void server_handler_1::forget(udp::endpoint from) {
-  auto i = ep_to_service.find(from);
-  if (i != ep_to_service.end()) {
-    service_to_dms.erase(i->second);
-    ep_to_service.erase(i);
+  auto i = ep_to_request.find(from);
+  if (i != ep_to_request.end()) {
+    request_to_dms.erase(i->second);
+    ep_to_request.erase(i);
   }
 }
 
@@ -134,9 +144,15 @@ void server_handler_1::handle( udp::endpoint from
     return;
   }
 
+  bool is_host;
+
   switch (client_method) {
     case CLIENT_METHOD_CLOSE: return forget(from);
-    case CLIENT_METHOD_FETCH: break; // Handled in the rest of this function.
+    case CLIENT_METHOD_FETCH: is_host = false;
+                              break; // Handled in the rest of this function.
+    case CLIENT_METHOD_FETCH_AS_HOST:
+                              is_host = true;
+                              break; // Handled in the rest of this function.
     default: {
                if (_options.verbosity() > 0) {
                  cout << "Invalid client method from " << from << endl;
@@ -175,17 +191,19 @@ void server_handler_1::handle( udp::endpoint from
     return forget(from);
   }
 
-  auto ep_i = ep_to_service.find(from);
-  auto service_i = service_to_dms.find(service);
+  Request request{service, is_host};
 
-  if (ep_i == ep_to_service.end()) {
-    if (service_i == service_to_dms.end()) {
+  auto ep_i = ep_to_request.find(from);
+  auto service_i = request_to_dms.find(request);
+
+  if (ep_i == ep_to_request.end()) {
+    if (service_i == request_to_dms.end()) {
       if (_options.verbosity() > 1) {
         cout << "Registering " << from << " on service " << service << endl;
       }
-      ep_to_service.emplace(from, service);
+      ep_to_request.emplace(from, request);
 
-      service_to_dms.emplace(service, make_dms( service
+      request_to_dms.emplace(request, make_dms( request
                                               , from
                                               , his_internal_ep));
     }
@@ -198,8 +216,8 @@ void server_handler_1::handle( udp::endpoint from
       }
       match(server, ext_ep, int_ep
                   , from, his_internal_ep);
-      ep_to_service.erase(ext_ep);
-      service_to_dms.erase(service_i);
+      ep_to_request.erase(ext_ep);
+      request_to_dms.erase(service_i);
     }
   }
   else {
@@ -209,19 +227,19 @@ void server_handler_1::handle( udp::endpoint from
       if (_options.verbosity() > 2) {
         cout << "Refresh " << from << " service " << service << endl;
       }
-      assert(service_i != service_to_dms.end());
+      assert(service_i != request_to_dms.end());
       service_i->second.alarm->start(Constant::keepalive_duration());
     }
     else {
-      service_to_dms.erase(old_service);
+      request_to_dms.erase(old_service);
 
-      if (service_i == service_to_dms.end()) {
+      if (service_i == request_to_dms.end()) {
         if (_options.verbosity() > 1) {
           cout << "Reregister " << from
                << " service " << service
                << " (old service: " << old_service << ")" << endl;
         }
-        service_to_dms.emplace(service, make_dms(service
+        request_to_dms.emplace(service, make_dms(service
                                                 , from
                                                 , his_internal_ep));
       }
@@ -234,8 +252,8 @@ void server_handler_1::handle( udp::endpoint from
         }
         match(server, ext_ep, int_ep
                     , from, his_internal_ep);
-        ep_to_service.erase(ep_i);
-        service_to_dms.erase(service_i);
+        ep_to_request.erase(ep_i);
+        request_to_dms.erase(service_i);
       }
     }
   }
@@ -243,7 +261,7 @@ void server_handler_1::handle( udp::endpoint from
 
 //------------------------------------------------------------------------------
 inline
-server_handler_1::DMS server_handler_1::make_dms( service_type  service
+server_handler_1::DMS server_handler_1::make_dms( Request  request
                                                 , udp::endpoint requester_ext
                                                 , udp::endpoint requester_int) {
   using std::cout;
@@ -257,11 +275,11 @@ server_handler_1::DMS server_handler_1::make_dms( service_type  service
                 , [=]() {
                     if (_options.verbosity() > 1) {
                       cout << "Deregister " << requester_ext
-                           << " on service " << service
+                           << " on service " << request.service
                            << " (timeout) " << endl;
                     }
-                    ep_to_service.erase(requester_ext);
-                    service_to_dms.erase(service);
+                    ep_to_request.erase(requester_ext);
+                    request_to_dms.erase(request);
                   })});
 }
 
